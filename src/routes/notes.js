@@ -84,10 +84,14 @@ router.post('/', async (req, res, next) => {
 
 // POST /api/notes/image - Upload an image and create an image note
 router.post('/image', upload.single('file'), async (req, res, next) => {
+  const startTime = Date.now();
+
   try {
     const { chapterId } = req.body;
 
-    // Validation
+    console.log('[ImageUpload] Starting image upload...');
+
+    // Step 1: Validate required fields
     if (!chapterId) {
       return res.status(400).json({
         error: { message: 'chapterId is required' }
@@ -100,40 +104,133 @@ router.post('/image', upload.single('file'), async (req, res, next) => {
       });
     }
 
-    // Verify chapter exists
-    const chapter = await prisma.chapter.findUnique({ where: { id: chapterId } });
+    // Step 2: Additional file validation (redundant check for safety)
+    const allowedMimeTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
+    if (!allowedMimeTypes.includes(req.file.mimetype)) {
+      // Clean up uploaded file
+      await fs.unlink(req.file.path).catch(err =>
+        console.warn('Failed to delete invalid file:', err.message)
+      );
+
+      return res.status(400).json({
+        error: {
+          message: 'Invalid file type. Only JPG, PNG, and WebP are allowed.',
+          allowedTypes: ['jpg', 'jpeg', 'png', 'webp'],
+          receivedType: req.file.mimetype,
+        }
+      });
+    }
+
+    // Check file size (10MB max)
+    const maxSize = 10 * 1024 * 1024; // 10MB in bytes
+    if (req.file.size > maxSize) {
+      // Clean up uploaded file
+      await fs.unlink(req.file.path).catch(err =>
+        console.warn('Failed to delete oversized file:', err.message)
+      );
+
+      return res.status(400).json({
+        error: {
+          message: 'File size exceeds maximum limit of 10MB',
+          maxSize: '10MB',
+          receivedSize: `${(req.file.size / (1024 * 1024)).toFixed(2)}MB`,
+        }
+      });
+    }
+
+    console.log(`[ImageUpload] File validated: ${req.file.filename} (${(req.file.size / 1024).toFixed(2)}KB)`);
+
+    // Step 3: Verify chapter exists and get title for context
+    const chapter = await prisma.chapter.findUnique({
+      where: { id: chapterId },
+      select: { id: true, title: true }
+    });
+
     if (!chapter) {
+      // Clean up uploaded file
+      await fs.unlink(req.file.path).catch(err =>
+        console.warn('Failed to delete file after chapter not found:', err.message)
+      );
+
       return res.status(404).json({
         error: { message: 'Chapter not found' }
       });
     }
 
-    // Generate image URL
+    console.log(`[ImageUpload] Chapter found: "${chapter.title}"`);
+
+    // Step 4: Generate public URL
     const imageUrl = `/uploads/images/${req.file.filename}`;
     const imagePath = req.file.path;
 
-    // Generate caption using OpenAI Vision
-    let imageCaption = 'Image uploaded';
+    // Step 5: Generate caption with chapter context using OpenAI Vision (P5)
+    let captionData = {
+      caption: 'Image uploaded',
+      description: '',
+      tags: [],
+    };
+
     try {
-      imageCaption = await generateImageCaption(imagePath);
+      console.log(`[ImageUpload] Generating caption with context: "${chapter.title}"`);
+      const { captionImage } = require('../services/openai');
+
+      // Use chapter title as context for better captioning
+      const context = `Image from chapter: "${chapter.title}"`;
+      captionData = await captionImage(imagePath, context);
+
+      console.log(`[ImageUpload] Caption generated: "${captionData.caption}"`);
+      console.log(`[ImageUpload] Tags: ${captionData.tags.join(', ')}`);
     } catch (error) {
-      console.error('Failed to generate image caption:', error);
+      console.error('[ImageUpload] Failed to generate caption:', error.message);
       // Continue with default caption
     }
 
-    // Create note
+    // Step 6: Create note with image data
     const note = await prisma.note.create({
       data: {
         chapterId,
         kind: 'image',
-        title: imageCaption.substring(0, 100), // Use caption as title
+        title: captionData.caption.substring(0, 100), // Use caption as title
         imageUrl,
-        imageCaption,
+        imageCaption: captionData.caption,
+        // Store full caption data including tags and description
+        elaborationJson: JSON.stringify({
+          caption: captionData.caption,
+          description: captionData.description,
+          tags: captionData.tags,
+          generatedAt: new Date().toISOString(),
+        }),
       },
     });
 
-    res.status(201).json(note);
+    const elapsedTime = Date.now() - startTime;
+    console.log(`[ImageUpload] ✅ Image note created in ${elapsedTime}ms (ID: ${note.id})`);
+
+    // Step 7: Return structured response
+    res.status(201).json({
+      note_id: note.id,
+      image_url: imageUrl,
+      image_caption: captionData.caption,
+      tags: captionData.tags,
+      description: captionData.description,
+      metadata: {
+        chapterTitle: chapter.title,
+        fileSize: req.file.size,
+        mimeType: req.file.mimetype,
+        elapsedMs: elapsedTime,
+      },
+    });
+
   } catch (error) {
+    // Clean up file on error if it exists
+    if (req.file?.path) {
+      await fs.unlink(req.file.path).catch(err =>
+        console.warn('Failed to delete file after error:', err.message)
+      );
+    }
+
+    const elapsedTime = Date.now() - startTime;
+    console.error(`[ImageUpload] ❌ Failed after ${elapsedTime}ms:`, error.message);
     next(error);
   }
 });

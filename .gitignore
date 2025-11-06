@@ -55,3 +55,7 @@ build/
 tmp/
 temp/
 *.tmp
+
+# Test fixtures
+test-fixtures/
+test-fixtures/**/*
