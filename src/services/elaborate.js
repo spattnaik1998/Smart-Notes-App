@@ -1,5 +1,5 @@
 const OpenAI = require('openai');
-const axios = require('axios');
+const { searchWeb } = require('./serper');
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -36,27 +36,20 @@ async function extractKeywords(noteContent) {
 }
 
 /**
- * Search web using Serper API
+ * Search web using Serper service (now using dedicated serper module)
  */
-async function searchWeb(query) {
+async function searchWebForElaboration(query) {
   try {
-    const response = await axios.post(
-      'https://google.serper.dev/search',
-      {
-        q: query,
-        num: 10, // Get top 10 results
-      },
-      {
-        headers: {
-          'X-API-KEY': process.env.SERPER_API_KEY,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
+    const results = await searchWeb(query, 10, 'us');
 
-    return response.data.organic || [];
+    // Convert normalized results back to the format expected by the rest of the code
+    return results.map(result => ({
+      title: result.title,
+      link: result.url,
+      snippet: result.snippet,
+    }));
   } catch (error) {
-    console.error('Serper API error:', error.response?.data || error.message);
+    console.error('Serper API error:', error.message);
     return [];
   }
 }
@@ -156,7 +149,7 @@ async function elaborateNote(note) {
 
   // Step 2: Search web with Serper
   console.log('🌐 Searching web...');
-  const searchResults = await searchWeb(searchQuery);
+  const searchResults = await searchWebForElaboration(searchQuery);
   console.log(`✓ Found ${searchResults.length} results`);
 
   if (searchResults.length === 0) {
@@ -201,7 +194,6 @@ async function elaborateNote(note) {
 module.exports = {
   elaborateNote,
   extractKeywords,
-  searchWeb,
   rerankSources,
   generateElaboration,
 };
