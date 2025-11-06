@@ -6,6 +6,9 @@ const path = require('path');
 const fs = require('fs').promises;
 const { elaborateNote } = require('../services/elaborate');
 const { generateImageCaption } = require('../services/image-caption');
+const { buildQueries, rerankResults, elaborateNote: elaborateNoteOpenAI } = require('../services/openai');
+const { searchWeb } = require('../services/serper');
+const { generateHash, isCacheValid } = require('../utils/hash');
 
 // Configure multer for image uploads
 const storage = multer.diskStorage({
@@ -271,11 +274,14 @@ router.delete('/:id', async (req, res, next) => {
 
 // POST /api/notes/:id/elaborate - Generate AI elaboration with references
 router.post('/:id/elaborate', async (req, res, next) => {
+  const startTime = Date.now();
+
   try {
     const { id } = req.params;
     const { force = false } = req.body; // Force regeneration even if cached
 
-    // Get the note
+    // Step 1: Load note
+    console.log(`[Elaborate] Loading note ${id}...`);
     const note = await prisma.note.findUnique({
       where: { id },
       include: {
@@ -291,56 +297,203 @@ router.post('/:id/elaborate', async (req, res, next) => {
       });
     }
 
-    // Check if note is empty
+    // Step 2: Validate note is not empty
     if (!note.bodyMd || note.bodyMd.trim().length === 0) {
       return res.status(400).json({
         error: { message: 'Cannot elaborate on an empty note' }
       });
     }
 
-    // Return cached elaboration if available and not forcing regeneration
+    // Step 3: Check cache by content hash (24h TTL)
+    const contentHash = generateHash(note.bodyMd);
+    console.log(`[Elaborate] Content hash: ${contentHash.substring(0, 16)}...`);
+
     if (note.elaborationJson && !force) {
+      try {
+        const cached = JSON.parse(note.elaborationJson);
+
+        // Check if cache is valid (content hash matches and within 24h)
+        if (cached.contentHash === contentHash && isCacheValid(note.updatedAt, 24)) {
+          console.log(`[Elaborate] Returning cached elaboration (age: ${Math.round((Date.now() - new Date(note.updatedAt)) / (1000 * 60 * 60))}h)`);
+
+          return res.json({
+            sections: cached.sections || [{ type: 'elaboration', content: cached.elaboratedContent }],
+            references: note.references.map(ref => ({
+              rank: ref.rank,
+              title: ref.title,
+              url: ref.url,
+              snippet: ref.snippet,
+            })),
+            metadata: {
+              cached: true,
+              cacheAge: new Date(note.updatedAt).toISOString(),
+              searchQuery: cached.searchQuery,
+              tokens: cached.tokens || { total: 0 },
+            },
+          });
+        } else {
+          console.log(`[Elaborate] Cache invalid (hash mismatch or expired)`);
+        }
+      } catch (parseError) {
+        console.warn(`[Elaborate] Failed to parse cached elaboration:`, parseError.message);
+      }
+    }
+
+    // Step 4: Generate new elaboration
+    console.log(`[Elaborate] Generating new elaboration...`);
+
+    // Step 4a: Build search queries (P1)
+    console.log(`[Elaborate] Building search queries...`);
+    const { queries, keywords } = await buildQueries(note.bodyMd, 1);
+    const searchQuery = queries[0] || keywords.join(' ');
+    console.log(`[Elaborate] Search query: "${searchQuery}"`);
+
+    // Step 4b: Search web with Serper (top 10)
+    console.log(`[Elaborate] Searching web (top 10 results)...`);
+    const searchResults = await searchWeb(searchQuery, 10, 'us');
+    console.log(`[Elaborate] Found ${searchResults.length} search results`);
+
+    if (searchResults.length === 0) {
+      console.warn(`[Elaborate] No search results found`);
+
+      // Generate elaboration without references
+      const elaborationContent = await elaborateNoteOpenAI(note.bodyMd, []);
+
+      const responseData = {
+        contentHash,
+        sections: [
+          {
+            type: 'elaboration',
+            content: elaborationContent,
+          },
+        ],
+        references: [],
+        searchQuery,
+        tokens: { total: 0 },
+      };
+
+      // Save to database
+      await prisma.note.update({
+        where: { id },
+        data: {
+          elaborationJson: JSON.stringify(responseData),
+        },
+      });
+
+      const elapsedTime = Date.now() - startTime;
+      console.log(`[Elaborate] Completed in ${elapsedTime}ms (no references)`);
+
       return res.json({
-        ...JSON.parse(note.elaborationJson),
-        cached: true,
+        sections: responseData.sections,
+        references: [],
+        metadata: {
+          cached: false,
+          searchQuery,
+          tokens: responseData.tokens,
+          elapsedMs: elapsedTime,
+        },
       });
     }
 
-    // Generate elaboration
-    const elaboration = await elaborateNote(note);
+    // Step 4c: Re-rank results (P2) - select top 3-6
+    console.log(`[Elaborate] Re-ranking results (selecting 3-6 best)...`);
+    const reranked = await rerankResults(note.bodyMd, searchResults, 6);
+    const selectedIndices = reranked.rankedIndices.slice(0, 6); // Max 6
+    const topSources = selectedIndices.map(idx => searchResults[idx]);
 
-    // Save elaboration to database
-    const updatedNote = await prisma.note.update({
-      where: { id },
-      data: {
-        elaborationJson: JSON.stringify(elaboration),
-      },
+    console.log(`[Elaborate] Selected ${topSources.length} top sources`);
+    topSources.forEach((source, idx) => {
+      console.log(`  [${idx + 1}] ${source.title.substring(0, 60)}...`);
     });
 
-    // Save references
-    if (elaboration.references && elaboration.references.length > 0) {
-      // Delete old references
-      await prisma.reference.deleteMany({
-        where: { noteId: id },
-      });
+    // Step 4d: Generate elaboration with citations (P3)
+    console.log(`[Elaborate] Generating elaboration with inline citations...`);
+    const elaborationContent = await elaborateNoteOpenAI(note.bodyMd, topSources);
 
-      // Create new references
+    // Step 5: Structure response
+    const sections = [
+      {
+        type: 'summary',
+        content: note.bodyMd.substring(0, 200),
+      },
+      {
+        type: 'elaboration',
+        content: elaborationContent,
+      },
+    ];
+
+    const references = topSources.map((source, idx) => ({
+      rank: idx + 1,
+      title: source.title,
+      url: source.url,
+      snippet: source.snippet || '',
+    }));
+
+    // Estimate token count (rough approximation: 1 token ≈ 4 chars)
+    const totalChars = note.bodyMd.length + elaborationContent.length + JSON.stringify(topSources).length;
+    const estimatedTokens = Math.ceil(totalChars / 4);
+
+    const responseData = {
+      contentHash,
+      sections,
+      references,
+      searchQuery,
+      tokens: {
+        total: estimatedTokens,
+        input: Math.ceil((note.bodyMd.length + JSON.stringify(topSources).length) / 4),
+        output: Math.ceil(elaborationContent.length / 4),
+      },
+    };
+
+    // Step 6: Persist to database
+    console.log(`[Elaborate] Persisting elaboration to database...`);
+
+    // Delete old references
+    await prisma.reference.deleteMany({
+      where: { noteId: id },
+    });
+
+    // Create new references
+    if (references.length > 0) {
       await prisma.reference.createMany({
-        data: elaboration.references.map((ref, index) => ({
+        data: references.map(ref => ({
           noteId: id,
-          rank: index + 1,
+          rank: ref.rank,
           title: ref.title,
           url: ref.url,
-          snippet: ref.snippet || '',
+          snippet: ref.snippet,
         })),
       });
     }
 
-    res.json({
-      ...elaboration,
-      cached: false,
+    // Update note with elaboration JSON
+    await prisma.note.update({
+      where: { id },
+      data: {
+        elaborationJson: JSON.stringify(responseData),
+      },
     });
+
+    const elapsedTime = Date.now() - startTime;
+    console.log(`[Elaborate] ✅ Completed in ${elapsedTime}ms`);
+
+    // Step 7: Return response
+    res.json({
+      sections,
+      references,
+      metadata: {
+        cached: false,
+        searchQuery,
+        tokens: responseData.tokens,
+        elapsedMs: elapsedTime,
+        sourcesFound: searchResults.length,
+        sourcesUsed: topSources.length,
+      },
+    });
+
   } catch (error) {
+    const elapsedTime = Date.now() - startTime;
+    console.error(`[Elaborate] ❌ Failed after ${elapsedTime}ms:`, error.message);
     next(error);
   }
 });
