@@ -1,0 +1,84 @@
+// This is your Prisma schema file
+// Learn more: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// User model - single user for v1 (can be extended later)
+model User {
+  id        String    @id @default(cuid())
+  email     String    @unique
+  name      String?
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+
+  chapters  Chapter[]
+
+  @@map("users")
+}
+
+// Chapter model - organizes notes into topics/courses
+model Chapter {
+  id          String   @id @default(cuid())
+  userId      String   @map("user_id")
+  title       String
+  description String?
+  position    Int      @default(0) // For manual ordering
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  user  User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  notes Note[]
+
+  @@index([userId, title])
+  @@index([userId, position])
+  @@map("chapters")
+}
+
+// Note model - supports both text and image notes
+model Note {
+  id               String    @id @default(cuid())
+  chapterId        String    @map("chapter_id")
+  kind             NoteKind  @default(text) // 'text' or 'image'
+  title            String
+  bodyMd           String?   @map("body_md") // Markdown content for text notes
+  imageUrl         String?   @map("image_url") // URL/path for image notes
+  imageCaption     String?   @map("image_caption") // AI-generated caption
+  elaborationJson  String?   @map("elaboration_json") // Cached elaboration result
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  chapter    Chapter     @relation(fields: [chapterId], references: [id], onDelete: Cascade)
+  references Reference[]
+
+  @@index([chapterId, updatedAt])
+  @@index([title])
+  @@map("notes")
+}
+
+// Reference model - stores web references for elaborations
+model Reference {
+  id      String @id @default(cuid())
+  noteId  String @map("note_id")
+  rank    Int // Position in reference list (1-6)
+  title   String
+  url     String
+  snippet String? // Short excerpt from the source
+
+  note Note @relation(fields: [noteId], references: [id], onDelete: Cascade)
+
+  @@index([noteId, rank])
+  @@map("references")
+}
+
+// Enum for note types
+enum NoteKind {
+  text
+  image
+}
