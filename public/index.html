@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Gen-AI Notes App</title>
+
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Markdown parser for rendering -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+
+  <style>
+    /* Custom scrollbar styling */
+    .custom-scrollbar::-webkit-scrollbar {
+      width: 8px;
+    }
+    .custom-scrollbar::-webkit-scrollbar-track {
+      background: #f1f1f1;
+    }
+    .custom-scrollbar::-webkit-scrollbar-thumb {
+      background: #888;
+      border-radius: 4px;
+    }
+    .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+      background: #555;
+    }
+
+    /* Slide-in animation for drawer */
+    .drawer-enter {
+      transform: translateX(100%);
+      transition: transform 0.3s ease-out;
+    }
+    .drawer-enter-active {
+      transform: translateX(0);
+    }
+    .drawer-exit {
+      transform: translateX(0);
+      transition: transform 0.3s ease-in;
+    }
+    .drawer-exit-active {
+      transform: translateX(100%);
+    }
+
+    /* Markdown content styling */
+    .markdown-content h1 {
+      @apply text-2xl font-bold mt-6 mb-4;
+    }
+    .markdown-content h2 {
+      @apply text-xl font-bold mt-5 mb-3;
+    }
+    .markdown-content h3 {
+      @apply text-lg font-semibold mt-4 mb-2;
+    }
+    .markdown-content p {
+      @apply mb-3;
+    }
+    .markdown-content ul, .markdown-content ol {
+      @apply ml-6 mb-3;
+    }
+    .markdown-content code {
+      @apply bg-gray-100 px-1 py-0.5 rounded text-sm font-mono;
+    }
+    .markdown-content pre {
+      @apply bg-gray-100 p-4 rounded mb-4 overflow-x-auto;
+    }
+    .markdown-content a {
+      @apply text-blue-600 hover:underline;
+    }
+  </style>
+</head>
+<body class="bg-gray-50 h-screen overflow-hidden">
+
+  <!-- Main Container -->
+  <div class="flex h-full">
+
+    <!-- Left Pane (Wide) - Chapters & Notes List -->
+    <div class="w-96 bg-white border-r border-gray-200 flex flex-col">
+
+      <!-- Header -->
+      <div class="p-4 border-b border-gray-200">
+        <h1 class="text-2xl font-bold text-gray-800">📝 Notes</h1>
+        <p class="text-sm text-gray-500 mt-1">AI-powered note taking</p>
+      </div>
+
+      <!-- New Chapter Button -->
+      <div class="p-4 border-b border-gray-200">
+        <button
+          onclick="showNewChapterModal()"
+          class="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-4 rounded-lg transition-colors"
+        >
+          + New Chapter
+        </button>
+      </div>
+
+      <!-- Chapters List -->
+      <div id="chapters-list" class="flex-1 overflow-y-auto custom-scrollbar">
+        <div class="p-4 text-center text-gray-500">
+          <p>Loading chapters...</p>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Main Pane - Editor -->
+    <div class="flex-1 flex flex-col bg-gray-50">
+
+      <!-- Editor Header -->
+      <div id="editor-header" class="bg-white border-b border-gray-200 p-4 flex items-center justify-between">
+        <div class="flex-1">
+          <div class="flex items-center gap-3">
+            <h2 id="current-note-title" class="text-xl font-semibold text-gray-800">
+              Select a note or create a new one
+            </h2>
+            <span id="save-status" class="text-sm text-gray-500"></span>
+          </div>
+          <p id="current-note-meta" class="text-sm text-gray-500 mt-1"></p>
+        </div>
+        <div class="flex gap-2">
+          <button
+            id="save-btn"
+            onclick="saveCurrentNote()"
+            class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg transition-colors hidden"
+          >
+            💾 Save
+          </button>
+          <button
+            id="delete-btn"
+            onclick="deleteCurrentNote()"
+            class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg transition-colors hidden"
+          >
+            🗑️ Delete
+          </button>
+        </div>
+      </div>
+
+      <!-- Editor Content -->
+      <div id="editor-content" class="flex-1 overflow-y-auto custom-scrollbar p-6">
+
+        <!-- Empty State -->
+        <div id="empty-state" class="text-center py-12">
+          <div class="text-6xl mb-4">📄</div>
+          <h3 class="text-xl font-semibold text-gray-700 mb-2">No note selected</h3>
+          <p class="text-gray-500 mb-6">Select a note from the left or create a new one</p>
+        </div>
+
+        <!-- Text Note Editor -->
+        <div id="text-editor" class="hidden">
+          <div class="mb-4">
+            <label class="block text-sm font-medium text-gray-700 mb-2">Title</label>
+            <input
+              type="text"
+              id="note-title-input"
+              class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              placeholder="Note title..."
+            >
+          </div>
+          <div class="mb-4">
+            <label class="block text-sm font-medium text-gray-700 mb-2">Content (Markdown)</label>
+            <textarea
+              id="note-body-input"
+              rows="20"
+              class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent font-mono"
+              placeholder="# Start writing your note here...&#10;&#10;Supports **Markdown** formatting!"
+            ></textarea>
+          </div>
+          <div class="flex gap-2">
+            <button
+              onclick="saveCurrentNote()"
+              class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg transition-colors"
+            >
+              Save Note
+            </button>
+            <button
+              onclick="previewMarkdown()"
+              class="bg-gray-600 hover:bg-gray-700 text-white px-6 py-2 rounded-lg transition-colors"
+            >
+              👁️ Preview
+            </button>
+          </div>
+        </div>
+
+        <!-- Image Note Viewer -->
+        <div id="image-viewer" class="hidden">
+          <div class="mb-4">
+            <label class="block text-sm font-medium text-gray-700 mb-2">Caption</label>
+            <input
+              type="text"
+              id="image-caption-input"
+              class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              placeholder="Image caption..."
+            >
+          </div>
+          <div class="mb-4">
+            <img
+              id="image-preview"
+              src=""
+              alt="Note image"
+              class="max-w-full h-auto rounded-lg border border-gray-300"
+            >
+          </div>
+          <div id="image-tags" class="flex flex-wrap gap-2"></div>
+        </div>
+
+        <!-- Image Upload Section -->
+        <div id="image-upload-section" class="hidden">
+          <div class="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center">
+            <div class="text-4xl mb-4">🖼️</div>
+            <h3 class="text-lg font-semibold text-gray-700 mb-2">Upload Image</h3>
+            <p class="text-sm text-gray-500 mb-4">PNG, JPG, or WebP (max 10MB)</p>
+            <input
+              type="file"
+              id="image-file-input"
+              accept="image/png,image/jpeg,image/jpg,image/webp"
+              class="hidden"
+              onchange="uploadImage()"
+            >
+            <button
+              onclick="document.getElementById('image-file-input').click()"
+              class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg transition-colors"
+            >
+              Choose Image
+            </button>
+          </div>
+        </div>
+
+      </div>
+
+    </div>
+
+    <!-- Right Drawer - Elaboration (Hidden by default) -->
+    <div
+      id="elaboration-drawer"
+      class="w-[32rem] bg-white border-l border-gray-200 shadow-xl hidden flex-col"
+    >
+
+      <!-- Drawer Header -->
+      <div class="p-4 border-b border-gray-200 flex items-center justify-between">
+        <h2 class="text-xl font-semibold text-gray-800">💬 Elaboration</h2>
+        <button
+          onclick="closeElaborationDrawer()"
+          class="text-gray-500 hover:text-gray-700 text-2xl leading-none"
+        >
+          ×
+        </button>
+      </div>
+
+      <!-- Drawer Content -->
+      <div class="flex-1 overflow-y-auto custom-scrollbar p-6">
+
+        <!-- Loading State -->
+        <div id="elaboration-loading" class="text-center py-12 hidden">
+          <div class="animate-spin text-4xl mb-4">⏳</div>
+          <p class="text-gray-600">Generating elaboration...</p>
+          <p class="text-sm text-gray-500 mt-2">This may take a few seconds</p>
+        </div>
+
+        <!-- Elaboration Content -->
+        <div id="elaboration-content" class="hidden">
+
+          <!-- Metadata -->
+          <div id="elaboration-meta" class="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6 text-sm">
+            <div class="flex items-center justify-between mb-2">
+              <span class="font-medium text-gray-700">Status:</span>
+              <span id="cache-status" class="px-2 py-1 bg-green-100 text-green-800 rounded text-xs font-medium">Cached</span>
+            </div>
+            <div class="flex items-center justify-between">
+              <span class="font-medium text-gray-700">Sources:</span>
+              <span id="sources-count" class="text-gray-600">0</span>
+            </div>
+          </div>
+
+          <!-- Sections -->
+          <div id="elaboration-sections" class="mb-6"></div>
+
+          <!-- References -->
+          <div id="elaboration-references" class="mb-6">
+            <h3 class="text-lg font-semibold text-gray-800 mb-4">📚 References</h3>
+            <div id="references-list"></div>
+          </div>
+
+          <!-- Actions -->
+          <div class="flex gap-2">
+            <button
+              onclick="regenerateElaboration()"
+              class="flex-1 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors"
+            >
+              🔄 Regenerate
+            </button>
+            <button
+              onclick="copyElaboration()"
+              class="flex-1 bg-gray-600 hover:bg-gray-700 text-white px-4 py-2 rounded-lg transition-colors"
+            >
+              📋 Copy
+            </button>
+          </div>
+
+        </div>
+
+        <!-- Error State -->
+        <div id="elaboration-error" class="hidden text-center py-12">
+          <div class="text-4xl mb-4">⚠️</div>
+          <h3 class="text-lg font-semibold text-gray-700 mb-2">Failed to generate elaboration</h3>
+          <p id="elaboration-error-message" class="text-sm text-gray-500 mb-4"></p>
+          <button
+            onclick="retryElaboration()"
+            class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg transition-colors"
+          >
+            Try Again
+          </button>
+        </div>
+
+      </div>
+
+    </div>
+
+  </div>
+
+  <!-- New Chapter Modal -->
+  <div id="new-chapter-modal" class="fixed inset-0 bg-black bg-opacity-50 hidden flex items-center justify-center z-50">
+    <div class="bg-white rounded-lg p-6 w-96">
+      <h3 class="text-xl font-semibold text-gray-800 mb-4">New Chapter</h3>
+      <div class="mb-4">
+        <label class="block text-sm font-medium text-gray-700 mb-2">Title</label>
+        <input
+          type="text"
+          id="new-chapter-title"
+          class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+          placeholder="Chapter title..."
+        >
+      </div>
+      <div class="mb-4">
+        <label class="block text-sm font-medium text-gray-700 mb-2">Description (optional)</label>
+        <textarea
+          id="new-chapter-description"
+          rows="3"
+          class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+          placeholder="Brief description..."
+        ></textarea>
+      </div>
+      <div class="flex gap-2">
+        <button
+          onclick="createChapter()"
+          class="flex-1 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors"
+        >
+          Create
+        </button>
+        <button
+          onclick="closeNewChapterModal()"
+          class="flex-1 bg-gray-300 hover:bg-gray-400 text-gray-700 px-4 py-2 rounded-lg transition-colors"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Notification -->
+  <div id="toast" class="fixed bottom-4 right-4 bg-gray-800 text-white px-6 py-3 rounded-lg shadow-lg hidden z-50">
+    <p id="toast-message"></p>
+  </div>
+
+  <!-- JavaScript -->
+  <script src="app.js"></script>
+
+</body>
+</html>

@@ -297,7 +297,7 @@ router.get('/:id', async (req, res, next) => {
   }
 });
 
-// PATCH /api/notes/:id - Update a note
+// PATCH /api/notes/:id - Update a note (partial update)
 router.patch('/:id', async (req, res, next) => {
   try {
     const { id } = req.params;
@@ -316,6 +316,50 @@ router.patch('/:id', async (req, res, next) => {
     if (title !== undefined) data.title = title;
     if (bodyMd !== undefined) data.bodyMd = bodyMd;
     if (imageCaption !== undefined) data.imageCaption = imageCaption;
+
+    const note = await prisma.note.update({
+      where: { id },
+      data,
+      include: {
+        references: {
+          orderBy: { rank: 'asc' },
+        },
+      },
+    });
+
+    res.json(note);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// PUT /api/notes/:id - Update a note (full update)
+router.put('/:id', async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { title, bodyMd, imageCaption } = req.body;
+
+    // Check if note exists
+    const existing = await prisma.note.findUnique({ where: { id } });
+    if (!existing) {
+      return res.status(404).json({
+        error: { message: 'Note not found' }
+      });
+    }
+
+    // Validate required fields based on note type
+    if (existing.kind === 'text' && !title) {
+      return res.status(400).json({
+        error: { message: 'Title is required for text notes' }
+      });
+    }
+
+    // Build update data (full update)
+    const data = {
+      title: title || existing.title,
+      bodyMd: bodyMd !== undefined ? bodyMd : existing.bodyMd,
+      imageCaption: imageCaption !== undefined ? imageCaption : existing.imageCaption,
+    };
 
     const note = await prisma.note.update({
       where: { id },
@@ -352,8 +396,11 @@ router.delete('/:id', async (req, res, next) => {
     // Delete associated image file if it's an image note
     if (existing.kind === 'image' && existing.imageUrl) {
       try {
-        const imagePath = path.join(process.cwd(), existing.imageUrl);
+        // Remove leading slash from imageUrl if present (e.g., /uploads/images/... -> uploads/images/...)
+        const relativePath = existing.imageUrl.startsWith('/') ? existing.imageUrl.substring(1) : existing.imageUrl;
+        const imagePath = path.join(process.cwd(), relativePath);
         await fs.unlink(imagePath);
+        console.log(`Deleted image file: ${imagePath}`);
       } catch (error) {
         console.error('Failed to delete image file:', error);
         // Continue with note deletion even if file deletion fails
