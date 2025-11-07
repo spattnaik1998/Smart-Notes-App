@@ -45,7 +45,7 @@ model Chapter {
 model Note {
   id               String    @id @default(cuid())
   chapterId        String    @map("chapter_id")
-  kind             NoteKind  @default(text) // 'text' or 'image'
+  kind             String    @default("text") // 'text' or 'image' (SQLite doesn't support enums)
   title            String
   bodyMd           String?   @map("body_md") // Markdown content for text notes
   imageUrl         String?   @map("image_url") // URL/path for image notes
@@ -75,10 +75,4 @@ model Reference {
 
   @@index([noteId, rank])
   @@map("references")
-}
-
-// Enum for note types
-enum NoteKind {
-  text
-  image
 }

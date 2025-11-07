@@ -53,6 +53,9 @@ app.use(metricsMiddleware);
 // IP-based rate limiting for all routes
 app.use(ipRateLimiter);
 
+// Static files for frontend (HTML, CSS, JS)
+app.use(express.static('public'));
+
 // Static files for uploaded images
 app.use('/uploads', express.static('uploads'));
 
