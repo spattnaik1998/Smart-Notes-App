@@ -9,6 +9,9 @@ const { generateImageCaption } = require('../services/image-caption');
 const { buildQueries, rerankResults, elaborateNote: elaborateNoteOpenAI } = require('../services/openai');
 const { searchWeb } = require('../services/serper');
 const { generateHash, isCacheValid } = require('../utils/hash');
+const { logRequest, logResponse, logError, hashContent } = require('../utils/logger');
+const { recordAiOperation } = require('../utils/metrics');
+const { aiOperationRateLimiter } = require('../middleware/rateLimiter');
 
 // Configure multer for image uploads
 const storage = multer.diskStorage({
@@ -83,7 +86,7 @@ router.post('/', async (req, res, next) => {
 });
 
 // POST /api/notes/image - Upload an image and create an image note
-router.post('/image', upload.single('file'), async (req, res, next) => {
+router.post('/image', aiOperationRateLimiter, upload.single('file'), async (req, res, next) => {
   const startTime = Date.now();
 
   try {
@@ -91,14 +94,28 @@ router.post('/image', upload.single('file'), async (req, res, next) => {
 
     console.log('[ImageUpload] Starting image upload...');
 
+    // Log image upload request
+    if (req.logger) {
+      req.logger.info('[ImageUpload] Request received', {
+        chapterId,
+        hasFile: !!req.file
+      });
+    }
+
     // Step 1: Validate required fields
     if (!chapterId) {
+      if (req.logger) {
+        req.logger.warn('[ImageUpload] Missing chapterId');
+      }
       return res.status(400).json({
         error: { message: 'chapterId is required' }
       });
     }
 
     if (!req.file) {
+      if (req.logger) {
+        req.logger.warn('[ImageUpload] Missing file');
+      }
       return res.status(400).json({
         error: { message: 'Image file is required' }
       });
@@ -204,7 +221,23 @@ router.post('/image', upload.single('file'), async (req, res, next) => {
     });
 
     const elapsedTime = Date.now() - startTime;
+    const elapsedSeconds = elapsedTime / 1000;
     console.log(`[ImageUpload] ✅ Image note created in ${elapsedTime}ms (ID: ${note.id})`);
+
+    // Record metrics
+    recordAiOperation('image_caption', elapsedSeconds, false);
+
+    // Log success
+    if (req.logger) {
+      req.logger.info('[ImageUpload] Image uploaded successfully', {
+        noteId: note.id,
+        chapterId,
+        fileSize: req.file.size,
+        mimeType: req.file.mimetype,
+        elapsedSeconds: elapsedSeconds.toFixed(3),
+        captionHash: hashContent(captionData.caption)
+      });
+    }
 
     // Step 7: Return structured response
     res.status(201).json({
@@ -230,7 +263,21 @@ router.post('/image', upload.single('file'), async (req, res, next) => {
     }
 
     const elapsedTime = Date.now() - startTime;
+    const elapsedSeconds = elapsedTime / 1000;
     console.error(`[ImageUpload] ❌ Failed after ${elapsedTime}ms:`, error.message);
+
+    // Record failed AI operation
+    recordAiOperation('image_caption_failed', elapsedSeconds, false);
+
+    // Log error
+    if (req.logger) {
+      logError(req, error, {
+        operation: 'image_upload',
+        chapterId: req.body.chapterId,
+        elapsedSeconds: elapsedSeconds.toFixed(3)
+      });
+    }
+
     next(error);
   }
 });
@@ -417,12 +464,22 @@ router.delete('/:id', async (req, res, next) => {
 });
 
 // POST /api/notes/:id/elaborate - Generate AI elaboration with references
-router.post('/:id/elaborate', async (req, res, next) => {
+// Apply AI operation rate limiter to this endpoint
+router.post('/:id/elaborate', aiOperationRateLimiter, async (req, res, next) => {
   const startTime = Date.now();
 
   try {
     const { id } = req.params;
     const { force = false } = req.body; // Force regeneration even if cached
+
+    // Log request (body hash only in production)
+    if (req.logger) {
+      req.logger.info('[Elaborate] Request received', {
+        noteId: id,
+        force,
+        bodyHash: hashContent(req.body?.bodyMd || '')
+      });
+    }
 
     // Step 1: Load note
     console.log(`[Elaborate] Loading note ${id}...`);
@@ -436,6 +493,9 @@ router.post('/:id/elaborate', async (req, res, next) => {
     });
 
     if (!note) {
+      if (req.logger) {
+        req.logger.warn('[Elaborate] Note not found', { noteId: id });
+      }
       return res.status(404).json({
         error: { message: 'Note not found' }
       });
@@ -443,6 +503,9 @@ router.post('/:id/elaborate', async (req, res, next) => {
 
     // Step 2: Validate note is not empty
     if (!note.bodyMd || note.bodyMd.trim().length === 0) {
+      if (req.logger) {
+        req.logger.warn('[Elaborate] Empty note', { noteId: id });
+      }
       return res.status(400).json({
         error: { message: 'Cannot elaborate on an empty note' }
       });
@@ -458,7 +521,20 @@ router.post('/:id/elaborate', async (req, res, next) => {
 
         // Check if cache is valid (content hash matches and within 24h)
         if (cached.contentHash === contentHash && isCacheValid(note.updatedAt, 24)) {
+          const elapsedTime = (Date.now() - startTime) / 1000;
           console.log(`[Elaborate] Returning cached elaboration (age: ${Math.round((Date.now() - new Date(note.updatedAt)) / (1000 * 60 * 60))}h)`);
+
+          // Record metrics for cached operation
+          recordAiOperation('elaborate', elapsedTime, true);
+
+          if (req.logger) {
+            req.logger.info('[Elaborate] Returned cached result', {
+              noteId: id,
+              cached: true,
+              elapsedSeconds: elapsedTime.toFixed(3),
+              bodyHash: contentHash.substring(0, 16)
+            });
+          }
 
           return res.json({
             sections: cached.sections || [{ type: 'elaboration', content: cached.elaboratedContent }],
@@ -619,7 +695,23 @@ router.post('/:id/elaborate', async (req, res, next) => {
     });
 
     const elapsedTime = Date.now() - startTime;
+    const elapsedSeconds = elapsedTime / 1000;
     console.log(`[Elaborate] ✅ Completed in ${elapsedTime}ms`);
+
+    // Record metrics for fresh elaboration
+    recordAiOperation('elaborate', elapsedSeconds, false);
+
+    // Log success
+    if (req.logger) {
+      req.logger.info('[Elaborate] Generated fresh elaboration', {
+        noteId: id,
+        cached: false,
+        elapsedSeconds: elapsedSeconds.toFixed(3),
+        sourcesUsed: topSources.length,
+        bodyHash: contentHash.substring(0, 16),
+        tokens: responseData.tokens.total
+      });
+    }
 
     // Step 7: Return response
     res.json({
@@ -637,7 +729,21 @@ router.post('/:id/elaborate', async (req, res, next) => {
 
   } catch (error) {
     const elapsedTime = Date.now() - startTime;
+    const elapsedSeconds = elapsedTime / 1000;
     console.error(`[Elaborate] ❌ Failed after ${elapsedTime}ms:`, error.message);
+
+    // Record failed AI operation metrics
+    recordAiOperation('elaborate_failed', elapsedSeconds, false);
+
+    // Log error with context
+    if (req.logger) {
+      logError(req, error, {
+        noteId: req.params.id,
+        operation: 'elaborate',
+        elapsedSeconds: elapsedSeconds.toFixed(3)
+      });
+    }
+
     next(error);
   }
 });
